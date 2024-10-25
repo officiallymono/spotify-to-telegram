@@ -202,7 +202,7 @@ if __name__ == "__main__":
                 "max_bio_len": max_bio_len,
             },
             trigger="interval",
-            seconds=15,
+            seconds=10,
         )
 
     if use_channel_nowplay:
