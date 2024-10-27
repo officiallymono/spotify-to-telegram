@@ -12,7 +12,7 @@ nowplay_bio = Template("🎧 Now Playing: $artist — $track")
 
 #  Telegram Channel Message
 use_channel_nowplay = True
-chat_id = SHLSAL
+chat_id = "SHLSAL"
 message_id = 3
 account = "open.spotify.com/user/31ahyhpqshvgaprpk2xshxfnspfe?si=bb2d223c99a14b7c"
 default_message = f"ain't listening to anything rn!| [Spotify Account]({account})"
