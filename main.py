@@ -1,5 +1,6 @@
 import spotipy
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+import httpx
 from httpx import AsyncClient
 from loguru import logger
 from pyrogram import filters
@@ -18,117 +19,94 @@ from config import (
     redirect_uri,
     scope,
     username,
+    chat_id,
+    default_message,
+    message_id,
+    nowplay_message,
+    use_channel_nowplay,
+    progress_bar_length,
+    progress_bar_filled,
+    progress_bar_center,
+    progress_bar_empty,
+    genius_api_key,
 )
 
-try:
-    from config import (
-        chat_id,
-        default_message,
-        message_id,
-        nowplay_message,
-        use_channel_nowplay,
-    )
-except ImportError:
-    use_channel_nowplay = False
 
-try:
-    from config import default_bio, is_premium, nowplay_bio, use_bio_nowplay
-except ImportError:
-    use_bio_nowplay = False
-
-
-def check_bio_len(max_bio_len: int, bio: str) -> str:
-    """Checks if bio is too long and truncates it
-
+def create_progress_bar(progress: float) -> str:
+    """Creates a progress bar based on the current track progress.
+    
     Args:
-        max_bio_len (int): maximum length of the bio
-        bio (str): current bio
-
+        progress (float): Current progress ratio (0.0 to 1.0)
+    
     Returns:
-        str: truncated bio and logs a warning if the bio is too long
+        str: Formatted progress bar
     """
-    if len(bio) > max_bio_len:
-        logger.warning(
-            f"Bio is too long!"
-            f"It's over the limit by {len(bio) - max_bio_len} characters."
-        )
-        return bio[: max_bio_len - 1][: bio.rfind(" ")] + "…"
-    else:
-        return bio
+    filled_length = int(progress * progress_bar_length)
+    empty_length = progress_bar_length - filled_length  # calculate empty section correctly
+
+    middle_position = int(progress * progress_bar_length)
+
+    # نوار پروگرس با کاراکترهای پر شده، خالی و نقطه وسط
+    bar = progress_bar_filled * middle_position + progress_bar_center + progress_bar_empty * (empty_length - 1)
+
+    return f"{bar}"
 
 
-async def update_status(app: Client, spotify: spotipy.Spotify, max_bio_len: int):
-    """Updates the status of the user
 
-    Args:
-        app (Client): Pyrogram client
-        spotify (spotipy.Spotify): Spotify client
-        max_bio_len (int): maximum length of the bio
-    """
+import time
 
-    global last_bio
-    current_song = spotify.current_user_playing_track()
+def format_time(ms: int) -> str:
+    """Converts milliseconds to a formatted time string (MM:SS)"""
+    minutes, seconds = divmod(ms // 1000, 60)
+    return f"{minutes:02}:{seconds:02}"
 
-    if current_song is None or not current_song["is_playing"]:
-        if last_bio != default_bio:
-            logger.info("Nothing playing")
-            last_bio = default_bio
-            await app.update_profile(bio=default_bio)
-    else:
-        track = current_song["item"]["name"]
-        album = current_song["item"]["album"]["name"]
-        artist = current_song["item"]["artists"][0]["name"]
-
-        new_bio = check_bio_len(
-            max_bio_len=max_bio_len,
-            bio=nowplay_bio.substitute(artist=artist, track=track, album=album),
-        )
-
-        if last_bio != new_bio:
-            last_bio = new_bio
-            logger.info(new_bio)
-            await app.update_profile(bio=new_bio)
-
+async def get_odesli_url(url: str) -> str:
+    """Fetches odesli URL from Spotify track URL."""
+    try:
+        async with AsyncClient() as client:
+            response = await client.get(
+                url=f"https://odesli.co/{url}", follow_redirects=True
+            )
+            return response.url
+    except Exception as e:
+        logger.error(f"Failed to fetch odesli URL: {e}")
+        return "Error"
 
 async def create_message(spotify: spotipy.Spotify) -> str:
-    """Creates a message based on the current song
-
-    Args:
-        spotify (spotipy.Spotify): Spotify client
-
-    Returns:
-        str: Message with now playing information with links
-    """
+    """Creates a message with odesli and Spotify links, and adds Genius link."""
     current_song = spotify.current_user_playing_track()
-
     if current_song is None or not current_song["is_playing"]:
         logger.info("Nothing playing")
         return default_message
-    else:
-        track = current_song["item"]["name"]
-        album = current_song["item"]["album"]["name"]
-        artist = current_song["item"]["artists"][0]["name"]
-        url = current_song["item"]["external_urls"]["spotify"]
-        try:
-            async with AsyncClient() as client:
-                response = await client.get(
-                    url="https://songwhip.com/" + url, follow_redirects=True
-                )
-                other_url = response.url
-        except Exception:
-            other_url = "Error"
 
-        new_message = nowplay_message.substitute(
-            artist=artist, track=track, album=album, spotify=url, other=other_url
-        )
-        logger.info(new_message)
-        return new_message
+    track = current_song["item"]["name"]
+    artist = current_song["item"]["artists"][0]["name"]
+    url = current_song["item"]["external_urls"]["spotify"]
+
+
+    other_url = await get_odesli_url(url) 
+
+    duration_ms = current_song["item"]["duration_ms"]
+    progress_ms = current_song["progress_ms"]
+    progress_ratio = progress_ms / duration_ms if duration_ms > 0 else 0.0
+    elapsed_time = format_time(progress_ms)
+    total_time = format_time(duration_ms)
+    progress_bar = create_progress_bar(progress_ratio)
+
+    new_message = nowplay_message.substitute(
+        artist=artist, track=track, spotify=url, progress_bar=progress_bar,
+        elapsed_time=elapsed_time, total_time=total_time, other=other_url,
+    )
+
+    logger.info(new_message)
+    return new_message
+
 
 
 async def update_message(
     app: Client, spotify: spotipy.Spotify, chat_id: int, message_id: int
 ) -> None:
-    """Updates the message with the current song
+    """Updates the message with the current song and progress bar
 
     Args:
         app (Client): Pyrogram client
@@ -136,6 +114,7 @@ async def update_message(
         chat_id (int): Chat ID
         message_id (int): Message ID
     """
+    # Await create_message to get the generated message
     text = await create_message(spotify=spotify)
 
     try:
@@ -151,12 +130,13 @@ async def update_message(
 
 
 async def send_message(message: Message) -> None:
-    """Sends a message with the current song
+    """Sends a message with the current song and progress bar
 
     Args:
         message (Message): Telegram message to edit
     """
     global spotify
+    # Await create_message to get the generated message
     text = await create_message(spotify=spotify)
 
     await message.edit_text(
@@ -164,6 +144,7 @@ async def send_message(message: Message) -> None:
         parse_mode=ParseMode.MARKDOWN,
         disable_web_page_preview=True,
     )
+
 
 
 if __name__ == "__main__":
@@ -182,9 +163,6 @@ if __name__ == "__main__":
         language="ru",
     )
 
-    last_bio = None
-    max_bio_len = 140 if is_premium else 70
-
     nowplay_handler = MessageHandler(
         callback=send_message,
         filters=(filters.command("nowplay", "!")),
@@ -192,18 +170,6 @@ if __name__ == "__main__":
     app.add_handler(nowplay_handler)
 
     scheduler = AsyncIOScheduler()
-
-    if use_bio_nowplay:
-        scheduler.add_job(
-            func=update_status,
-            kwargs={
-                "app": app,
-                "spotify": spotify,
-                "max_bio_len": max_bio_len,
-            },
-            trigger="interval",
-            seconds=10,
-        )
 
     if use_channel_nowplay:
         scheduler.add_job(
@@ -215,7 +181,7 @@ if __name__ == "__main__":
                 "message_id": message_id,
             },
             trigger="interval",
-            seconds=20,
+            seconds=17,
         )
 
     scheduler.start()
